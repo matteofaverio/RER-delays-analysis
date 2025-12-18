@@ -1,36 +1,34 @@
-from typing import Any, Dict, Optional
+from __future__ import annotations
+
 import time
+from typing import Any, Dict, Optional
+
 import httpx
 
+from .config import Settings
 
-class PrimClient:
-    def __init__(
-        self,
-        api_key: str,
-        timeout_s: float = 30.0,
-        max_retries: int = 3,
-        backoff_s: Optional[list] = None,
-    ) -> None:
-        self._api_key = api_key
-        self._timeout = httpx.Timeout(timeout_s)
-        self._max_retries = max_retries
-        self._backoff = backoff_s or [0.0, 1.0, 2.0, 4.0]
 
-    def get_json(self, url: str) -> Dict[str, Any]:
-        headers = {"apiKey": self._api_key}
+def fetch_estimated_timetable_json(settings: Settings, timeout_s: float = 30.0) -> Dict[str, Any]:
+    """
+    Fetch a single Estimated Timetable snapshot from IDFM PRIM.
 
-        last_err: Optional[Exception] = None
-        for k in range(min(self._max_retries, len(self._backoff))):
-            delay = self._backoff[k]
-            if delay > 0:
-                time.sleep(delay)
+    Authentication: apiKey header.
+    """
+    headers = {"apiKey": settings.prim_api_key}
+    timeout = httpx.Timeout(connect=10.0, read=timeout_s, write=10.0, pool=10.0)
 
-            try:
-                with httpx.Client(timeout=self._timeout) as client:
-                    r = client.get(url, headers=headers)
-                    r.raise_for_status()
-                    return r.json()
-            except Exception as e:  # intentionally broad: network + decoding
-                last_err = e
+    backoff_s = [0.0, 1.0, 2.0, 4.0]
+    last_err: Optional[Exception] = None
 
-        raise RuntimeError(f"PRIM request failed after retries: {last_err}")
+    for b in backoff_s:
+        if b:
+            time.sleep(b)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                r = client.get(settings.estimated_timetable_url, headers=headers)
+                r.raise_for_status()
+                return r.json()
+        except Exception as e:
+            last_err = e
+
+    raise RuntimeError(f"PRIM request failed after retries: {last_err}")

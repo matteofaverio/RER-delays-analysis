@@ -1,14 +1,16 @@
-from pathlib import Path
-from idf_rer.gtfs_stop_index import build_stop_index
+import argparse
+from idf_rer.gtfs_stop_index import GtfsStopIndexPaths, build_stop_index
 
 
 def main() -> None:
-    stops = Path("data/gtfs/stops.txt")
-    ext = Path("data/gtfs/stop_extensions.txt")
-    out = Path("data/static/rer_stop_index.csv")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--stops", default="data/static/stops.txt")
+    ap.add_argument("--stop-extensions", default="data/static/stop_extensions.txt")
+    ap.add_argument("--out", default="data/derived/stop_index.csv")
+    args = ap.parse_args()
 
-    idx = build_stop_index(stops, ext, out)
-    print(f"OK: wrote {out} ({len(idx)} rows)")
+    out = build_stop_index(GtfsStopIndexPaths(args.stops, args.stop_extensions, args.out))
+    print(out)
 
 
 if __name__ == "__main__":

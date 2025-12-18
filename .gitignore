@@ -1,22 +1,21 @@
-# Python
+# python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-*.egg-info/
-dist/
-build/
-
-# venv / env
 .venv/
 .env
-.env.*
 
-# OS / editor
+# os/editor
 .DS_Store
 .vscode/
 
-# data: keep only samples
+# data (keep only samples)
 data/*
 !data/sample/
 !data/sample/**
+!data/static/
+!data/static/**
+
+# artifacts
+*.png
+*.pdf
+*.csv~ 

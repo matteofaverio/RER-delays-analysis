@@ -1,18 +1,17 @@
-# IDF RER delay panel (PRIM polling + GTFS enrichment)
+# IDF RER delays — dataset & analysis
 
-This repository contains a reproducible pipeline to build a station/line delay panel for the Île-de-France RER network (A–E), starting from:
-- the IDFM PRIM marketplace **Estimated Timetable** endpoint (SIRI EstimatedTimetableDelivery),
-- the official IDFM GTFS bundle (stops + stop_extensions) to map quay identifiers to station-level metadata.
+This repository builds a station-level delay panel for RER (A–E) using the IDFM PRIM Estimated Timetable endpoint, and enriches it with static covariates and historical weather.
 
-The code is designed to be:
-- **scriptable** (CLI entrypoints under `scripts/`)
-- **auditable** (explicit outputs, conservative filtering, no silent drops)
-- **safe for public release** (API keys are read from `.env` and never committed)
+## Repo layout
+- `src/idf_rer/`: reusable library code
+- `scripts/`: entrypoints
+- `data/sample/`: small sample files committed for inspection
+- `data/static/`: instructions for GTFS inputs (not committed by default)
 
-## Quick start
-
-### 1) Setup
+## Setup
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements/base.txt
+pip install -r requirements.txt
+cp .env.example .env
+# edit .env and set PRIM_API_KEY

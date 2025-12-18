@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idf-rer-delays"
+version = "0.1.0"
+description = "Build a station-level delay panel for RER (IDFM PRIM) and enrich it with static covariates and weather."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+
+[tool.setuptools]
+package-dir = {"" = "src"}

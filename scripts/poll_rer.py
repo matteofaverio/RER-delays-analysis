@@ -1,39 +1,21 @@
 import argparse
-from pathlib import Path
+from dotenv import load_dotenv
 
-from dotenv import load_dotenv, find_dotenv
-
-from idf_rer.config import load_prim_config
-from idf_rer.prim_client import PrimClient
-from idf_rer.polling_pipeline import poll_once
+from idf_rer.config import Settings
+from idf_rer.polling_pipeline import run_one_poll
 
 
 def main() -> None:
-    load_dotenv(find_dotenv(usecwd=True), override=True)
+    load_dotenv()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--interval-sec", type=int, default=300)
-    ap.add_argument("--iterations", type=int, default=1)
-    ap.add_argument("--raw-dir", type=str, default="data/rer_raw")
-    ap.add_argument("--lead-horizon-sec", type=int, default=600)
-    ap.add_argument("--outliers-csv", type=str, default="data/debug/snapshot_outliers.csv")
+    ap.add_argument("--bin-sec", type=int, default=300)
     args = ap.parse_args()
 
-    cfg = load_prim_config()
-    client = PrimClient(api_key=cfg.api_key)
-
-    raw_dir = Path(args.raw_dir)
-    outliers = Path(args.outliers_csv) if args.outliers_csv else None
-
-    for _ in range(int(args.iterations)):
-        out = poll_once(
-            client=client,
-            url=cfg.estimated_timetable_url,
-            raw_dir=raw_dir,
-            lead_horizon_s=int(args.lead_horizon_sec),
-            outliers_path=outliers,
-        )
-        print(f"OK: appended -> {out}")
+    settings = Settings.from_env()
+    raw_path, daily_path = run_one_poll(settings, bin_sec=args.bin_sec)
+    print(f"raw: {raw_path}")
+    print(f"daily: {daily_path}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+pandas>=2.0,<2.2
+numpy>=1.24,<2.0
+httpx>=0.28,<0.29
+python-dotenv>=1.0,<2.0
+
+# weather
+requests>=2.32,<3.0
+
+# geo stack
+geopandas>=0.13,<0.14
+shapely>=2.0,<2.1
+pyproj>=3.5,<3.7
+contextily>=1.5,<1.7
+matplotlib>=3.7,<3.9
