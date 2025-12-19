@@ -1,215 +1,216 @@
-# src/weather/merge_weather_delays.py
+"""
+Merge RER delay panel (raw polling aggregates) with:
+- GTFS-derived stop index (quay/platform -> station metadata)
+- per-station hourly weather (Open-Meteo)
+
+The goal is to produce a clean, analysis-ready table without duplicated columns
+and with a stable join key:
+    (station_code, weather_time_utc=floor(poll_at_utc to hour))
+
+Expected inputs
+---------------
+raw_csv:
+    data/sample/rer_raw/YYYY-MM-DD.csv
+    columns include: poll_at_utc, poll_at_local, stop_id, line_code, mean_delay_s, ...
+
+stop_index_csv:
+    data/derived/rer_stop_index.csv
+    columns include: quay_code, station_code, stop_name, stop_lat, stop_lon, zone_id, ...
+
+stations_csv:
+    data/derived/stations.csv
+    used only for a compatibility mapping:
+        weather files may contain numeric "station_code" (e.g., 790),
+        which corresponds to stations.old_station_code.
+
+weather_csv:
+    data/sample/weather/YYYY-MM-DD_weather.csv
+    columns include: station_code, weather_time_utc, temperature_2m, precipitation, wind_speed_10m
+"""
+
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import pandas as pd
 
-PathLike = Union[str, Path]
 
-_PAT_Q_SP = re.compile(r":(?:Q|SP):(\d+):")   # STIF:StopPoint:Q:491414: / STIF:StopArea:SP:43044:
-_PAT_IDFM = re.compile(r"IDFM:(\d+)")
-
-
-def _as_path(p: PathLike) -> Path:
-    return p if isinstance(p, Path) else Path(p)
+_STOP_ID_RE = re.compile(r":(?:Q|SP):(\d+):")
+_IDFM_RE = re.compile(r"IDFM:(\d+)")
 
 
-def _read_csv(path: PathLike, **kwargs) -> pd.DataFrame:
-    p = _as_path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"File not found: {p}")
-    return pd.read_csv(p, **kwargs)
+def _extract_quay_code(stop_id: object) -> Optional[str]:
+    """
+    Extract numeric quay/platform code from SIRI stop identifiers.
 
-
-def _extract_digits(stop_id: str) -> Optional[str]:
+    Examples:
+      STIF:StopPoint:Q:491414: -> 491414
+      STIF:StopArea:SP:43044:  -> 43044
+      IDFM:472963              -> 472963
+    """
     if stop_id is None or (isinstance(stop_id, float) and pd.isna(stop_id)):
         return None
     s = str(stop_id)
 
-    m = _PAT_Q_SP.search(s)
+    m = _STOP_ID_RE.search(s)
     if m:
-        return str(int(m.group(1)))
+        return m.group(1)
 
-    m = _PAT_IDFM.search(s)
+    m = _IDFM_RE.search(s)
     if m:
-        return str(int(m.group(1)))
+        return m.group(1)
 
-    digits = re.findall(r"\d+", s)
-    if not digits:
-        return None
-    return str(int(digits[-1]))
+    # Last resort: take the last numeric token if present
+    m = re.findall(r"\d+", s)
+    if m:
+        return m[-1]
 
-
-def _pick_weather_file(weather_dir: Path, date: str) -> Path:
-    candidates = [
-        weather_dir / f"{date}_weather.csv",
-        weather_dir / f"{date} weather.csv",
-        weather_dir / f"{date}-weather.csv",
-        weather_dir / f"{date}.csv",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    raise FileNotFoundError("Weather file not found. Tried: " + ", ".join(str(c) for c in candidates))
+    return None
 
 
-def _best_stop_index_join(
-    raw_unique: pd.DataFrame,
-    stop_index: pd.DataFrame,
-) -> Tuple[str, str, float]:
+def _read_csv(path: str | Path) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {p}")
+    return pd.read_csv(p, dtype=str)
+
+
+def _to_utc(ts: pd.Series) -> pd.Series:
+    # utc=True makes tz-naive timestamps interpreted as UTC, and keeps tz-aware in UTC.
+    return pd.to_datetime(ts, errors="coerce", utc=True)
+
+
+def _normalize_weather_station_code(weather: pd.DataFrame, stations: pd.DataFrame) -> pd.DataFrame:
     """
-    Choose which join key to use between raw and stop_index.
+    Make weather.station_code compatible with our canonical station_code.
 
-    raw_unique must contain:
-      - quay_code (digits as string)
-      - stop_id_idfm (IDFM:<digits>)
-
-    stop_index may contain one or more of:
-      - quay_code
-      - stop_id_idfm
+    Some legacy weather files store the numeric "old_station_code" as station_code
+    (e.g., "790" for Villepinte). If detected, map it back to the 3-letter station_code.
     """
-    candidates = []
-    if "quay_code" in stop_index.columns:
-        candidates.append(("quay_code", "quay_code"))
-    if "stop_id_idfm" in stop_index.columns:
-        candidates.append(("stop_id_idfm", "stop_id_idfm"))
+    if "station_code" not in weather.columns:
+        raise ValueError("weather_csv must contain a 'station_code' column.")
 
-    if not candidates:
-        raise ValueError(
-            "rer_stop_index.csv must contain either 'quay_code' or 'stop_id_idfm' to join with raw stop_id."
-        )
+    w = weather.copy()
+    w["station_code"] = w["station_code"].astype(str).str.strip()
 
-    best = ("", "", -1.0)
-    for raw_col, idx_col in candidates:
-        idx_keys = stop_index[[idx_col]].dropna().astype(str).drop_duplicates()
-        probe = raw_unique[[raw_col]].dropna().astype(str).drop_duplicates()
-        merged = probe.merge(idx_keys, left_on=raw_col, right_on=idx_col, how="left", indicator=True)
-        hit_rate = (merged["_merge"] == "both").mean() if len(merged) else 0.0
-        if hit_rate > best[2]:
-            best = (raw_col, idx_col, float(hit_rate))
+    if "old_station_code" not in stations.columns or "station_code" not in stations.columns:
+        return w
 
-    return best
+    st = stations.copy()
+    st["old_station_code"] = st["old_station_code"].astype(str).str.strip()
+    st["station_code"] = st["station_code"].astype(str).str.strip()
+
+    mapping = (
+        st.loc[st["old_station_code"].notna() & (st["old_station_code"] != ""), ["old_station_code", "station_code"]]
+        .drop_duplicates()
+        .set_index("old_station_code")["station_code"]
+        .to_dict()
+    )
+
+    # Heuristic: if most codes look numeric, apply mapping where possible
+    numeric_share = w["station_code"].str.fullmatch(r"\d+").mean()
+    if numeric_share >= 0.30:
+        w["station_code"] = w["station_code"].map(lambda x: mapping.get(x, x))
+
+    return w
 
 
 def merge_daily_raw_with_weather(
     *,
-    raw_csv: PathLike,
-    stop_index_csv: PathLike,
-    stations_csv: PathLike,
-    weather_csv: Optional[PathLike] = None,
-    weather_dir: Optional[PathLike] = None,
-    date: Optional[str] = None,
-    out_csv: Optional[PathLike] = None,
-    max_unmapped_share: float = 0.05,
-    drop_unmapped_stops: bool = False,
+    raw_csv: str | Path,
+    stop_index_csv: str | Path,
+    stations_csv: str | Path,
+    weather_csv: str | Path,
+    out_csv: Optional[str | Path] = None,
+    drop_unmapped_stops: bool = True,
+    max_unmapped_share: float = 0.40,
 ) -> pd.DataFrame:
     """
-    Merge one service-day raw file with hourly weather.
+    Merge a daily raw RER panel with stop/station metadata and hourly weather.
 
-    Mapping strategy:
-    - Parse digits from raw stop_id into quay_code
-    - Build stop_id_idfm = 'IDFM:<digits>'
-    - Automatically choose the best join key against rer_stop_index.csv
-      (quay_code vs stop_id_idfm) based on match-rate.
-
-    Missing mapping handling:
-    - If drop_unmapped_stops=True: drop unmapped rows.
-    - Else: allow up to max_unmapped_share; above that raise an error.
+    Parameters
+    ----------
+    drop_unmapped_stops:
+        If True, drop rows whose stop_id cannot be mapped to station_code.
+    max_unmapped_share:
+        If share of unmapped rows exceeds this threshold, raise (usually join-key mismatch).
     """
-    raw_path = _as_path(raw_csv)
-    stop_index_path = _as_path(stop_index_csv)
-    stations_path = _as_path(stations_csv)
+    raw = _read_csv(raw_csv)
+    stop_index = _read_csv(stop_index_csv)
+    stations = _read_csv(stations_csv)
+    weather = _read_csv(weather_csv)
 
-    if weather_csv is not None:
-        weather_path = _as_path(weather_csv)
-    else:
-        if weather_dir is None or date is None:
-            raise ValueError("Provide either weather_csv, or (weather_dir and date).")
-        weather_path = _pick_weather_file(_as_path(weather_dir), date)
+    # --- parse timestamps in raw
+    if "poll_at_utc" not in raw.columns:
+        raise ValueError("raw_csv must contain 'poll_at_utc'.")
+    raw["poll_at_utc"] = _to_utc(raw["poll_at_utc"])
 
-    out_path = _as_path(out_csv) if out_csv is not None else None
+    # --- build quay_code join key
+    raw["quay_code"] = raw["stop_id"].map(_extract_quay_code).astype(str)
+    raw.loc[raw["quay_code"].isin(["None", "nan"]), "quay_code"] = pd.NA
 
-    raw = _read_csv(raw_path, dtype={"stop_id": str, "line_code": str})
-    stop_index = _read_csv(stop_index_path, dtype=str)
-    stations = _read_csv(stations_path, dtype=str)
-    weather = _read_csv(weather_path, dtype={"station_code": str})
+    stop_index["quay_code"] = stop_index["quay_code"].astype(str).str.strip()
 
-    # --- raw join keys ---
-    raw["quay_code"] = raw["stop_id"].map(_extract_digits).astype("string")
-    raw["stop_id_idfm"] = raw["quay_code"].map(lambda x: f"IDFM:{x}" if pd.notna(x) else pd.NA).astype("string")
-
-    raw_unique = raw[["quay_code", "stop_id_idfm"]].copy()
-    raw_key, idx_key, hit_rate = _best_stop_index_join(raw_unique, stop_index)
-
-    meta_cols = [
-        c for c in [
-            "quay_code", "stop_id_idfm",
-            "monomodal_stop_id", "monomodal_code",
-            "stop_name", "zone_id", "stop_lat", "stop_lon",
-            "station_code",
-        ]
-        if c in stop_index.columns
+    # Keep only the columns we want from the stop index to avoid noisy duplicates.
+    stop_keep = [
+        "quay_code",
+        "stop_id_idfm",
+        "monomodal_stop_id",
+        "monomodal_code",
+        "stop_name",
+        "parent_station",
+        "stop_lat",
+        "stop_lon",
+        "zone_id",
+        "location_type",
+        "station_code",
     ]
-    stop_small = stop_index[meta_cols].drop_duplicates(subset=[idx_key])
+    stop_keep = [c for c in stop_keep if c in stop_index.columns]
+    stop_index_small = stop_index[stop_keep].copy()
 
-    df = raw.merge(stop_small, left_on=raw_key, right_on=idx_key, how="left")
+    df = raw.merge(stop_index_small, on="quay_code", how="left", validate="m:1")
 
-    # --- station_code enrichment from stations.csv if needed ---
-    if "station_code" not in df.columns:
-        df["station_code"] = pd.NA
+    # --- unmapped diagnostics
+    missing_station = df["station_code"].isna()
+    missing_share = float(missing_station.mean()) if len(df) else 0.0
+    if missing_share > max_unmapped_share:
+        examples = df.loc[missing_station, "stop_id"].dropna().astype(str).head(10).tolist()
+        raise ValueError(
+            f"Stop-to-station mapping incomplete: missing station_code for {int(missing_station.sum())} rows "
+            f"({missing_share:.1%}). Example stop_id: {examples}. "
+            "This usually means the stop_id parsing/join key does not match your rer_stop_index.csv."
+        )
+    if drop_unmapped_stops and missing_share > 0:
+        df = df.loc[~missing_station].copy()
 
-    if df["station_code"].isna().any():
-        # primary: monomodal_stop_id
-        if "monomodal_stop_id" in df.columns and "monomodal_stop_id" in stations.columns:
-            st = stations[["station_code", "monomodal_stop_id"]].drop_duplicates(subset=["monomodal_stop_id"])
-            df = df.merge(st, on="monomodal_stop_id", how="left", suffixes=("", "_st"))
-            if "station_code_st" in df.columns:
-                df["station_code"] = df["station_code"].fillna(df["station_code_st"])
-                df.drop(columns=["station_code_st"], inplace=True)
+    # --- weather parsing and normalization
+    weather = _normalize_weather_station_code(weather, stations)
 
-        # fallback: monomodal_code
-        if df["station_code"].isna().any() and ("monomodal_code" in df.columns) and ("monomodal_code" in stations.columns):
-            st2 = stations[["station_code", "monomodal_code"]].drop_duplicates(subset=["monomodal_code"])
-            df = df.merge(st2, on="monomodal_code", how="left", suffixes=("", "_st2"))
-            if "station_code_st2" in df.columns:
-                df["station_code"] = df["station_code"].fillna(df["station_code_st2"])
-                df.drop(columns=["station_code_st2"], inplace=True)
+    if "weather_time_utc" not in weather.columns:
+        raise ValueError("weather_csv must contain 'weather_time_utc'.")
 
-    # --- unmapped handling ---
-    missing = df["station_code"].isna()
-    n_missing = int(missing.sum())
-    if n_missing > 0:
-        share = n_missing / max(1, len(df))
-        if drop_unmapped_stops:
-            df = df.loc[~missing].copy()
-        else:
-            if share > float(max_unmapped_share):
-                examples = df.loc[missing, "stop_id"].head(10).tolist()
-                raise ValueError(
-                    "Stop-to-station mapping incomplete: "
-                    f"missing station_code for {n_missing} rows ({share:.1%}). "
-                    f"Example stop_id: {examples}. "
-                    f"Join tried: raw.{raw_key} -> stop_index.{idx_key} (match-rate on keys ≈ {hit_rate:.1%}). "
-                    "This usually means the stop_id parsing/join key does not match rer_stop_index.csv, "
-                    "or rer_stop_index.csv was built from a different GTFS snapshot."
-                )
+    weather["weather_time_utc"] = _to_utc(weather["weather_time_utc"])
 
-    # --- weather merge (hourly) ---
-    df["poll_at_utc"] = pd.to_datetime(df["poll_at_utc"], utc=True, errors="coerce")
-    df["weather_time_utc"] = df["poll_at_utc"].dt.floor("H")
-    weather["weather_time_utc"] = pd.to_datetime(weather["weather_time_utc"], utc=True, errors="coerce")
+    # Keep only weather variables needed for analysis (avoid stop_name duplication).
+    weather_keep = ["station_code", "weather_time_utc", "temperature_2m", "precipitation", "wind_speed_10m"]
+    weather_keep = [c for c in weather_keep if c in weather.columns]
+    weather_small = weather[weather_keep].copy()
+
+    # Align to hour
+    df["weather_time_utc"] = df["poll_at_utc"].dt.floor("h")
 
     df = df.merge(
-        weather,
+        weather_small,
         on=["station_code", "weather_time_utc"],
         how="left",
         validate="m:1",
     )
 
-    if out_path is not None:
+    # Optional output
+    if out_csv is not None:
+        out_path = Path(out_csv)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(out_path, index=False)
 
